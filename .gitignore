@@ -1,0 +1,19 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# data
+data/models/
+data/chroma/
+data/whisper/
+
+# UI build
+src/local_mind/ui_dist/
+web-ui/node_modules/
