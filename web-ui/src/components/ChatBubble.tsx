@@ -92,6 +92,32 @@ export function ChatBubble({ message }: ChatBubbleProps) {
             )}
           </div>
         )}
+        {!isUser && message.webSources && message.webSources.sources.length > 0 && (
+          <div className="mt-2 rounded-lg border border-line bg-bg/60 p-2 text-[0.7rem]">
+            <div className="mb-1 font-semibold text-zinc-300">
+              {message.webSources.status === "learned"
+                ? `Web sources learned (${message.webSources.chunks ?? 0} chunks)`
+                : "Web sources"}
+            </div>
+            <ul className="space-y-1">
+              {message.webSources.sources.map((s) => (
+                <li key={s.url} className="leading-snug">
+                  <a
+                    href={s.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-400 hover:underline"
+                  >
+                    {s.title || s.url}
+                  </a>
+                  {s.snippet && (
+                    <div className="text-muted">{s.snippet}</div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {!isUser && message.decision && (
           <DecisionBadge decision={message.decision} />
         )}

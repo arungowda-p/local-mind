@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { ChatMessage, CodeResult, DecisionMeta } from "@/types";
+import type { ChatMessage, CodeResult, DecisionMeta, WebSearchSummary } from "@/types";
 
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -77,11 +77,25 @@ export function useChat() {
                 error?: string;
                 decision?: DecisionMeta;
                 code_results?: CodeResult[];
+                web_sources?: WebSearchSummary;
+                rewrite?: string;
               };
               if (parsed.code_results) {
                 setMessages((prev) => {
                   const last = prev[prev.length - 1];
                   return [...prev.slice(0, -1), { ...last, codeResults: parsed.code_results }];
+                });
+              }
+              if (parsed.web_sources) {
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  return [...prev.slice(0, -1), { ...last, webSources: parsed.web_sources }];
+                });
+              }
+              if (parsed.rewrite) {
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  return [...prev.slice(0, -1), { ...last, content: parsed.rewrite as string }];
                 });
               }
               if (parsed.decision) {

@@ -137,6 +137,10 @@ async def chat_endpoint(body: ChatRequest) -> Any:
                         yield f"data: {json.dumps({'token': item['token']})}\n\n"
                     elif item["type"] == "code_results":
                         yield f"data: {json.dumps({'code_results': item['results']})}\n\n"
+                    elif item["type"] == "web_sources":
+                        yield f"data: {json.dumps({'web_sources': item['web_sources']})}\n\n"
+                    elif item["type"] == "rewrite":
+                        yield f"data: {json.dumps({'rewrite': item['content']})}\n\n"
                     elif item["type"] == "done":
                         yield "data: [DONE]\n\n"
             except Exception as e:
@@ -234,6 +238,19 @@ def learn_url(body: LearnUrlRequest) -> dict[str, Any]:
 def learn_text(body: LearnTextRequest) -> dict[str, Any]:
     try:
         return knowledge.learn_text(body.text, body.source)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+class KnowledgeQueryRequest(BaseModel):
+    query: str
+    top_k: int | None = None
+
+
+@app.post("/api/knowledge/query")
+def knowledge_query(body: KnowledgeQueryRequest) -> list[dict[str, Any]]:
+    try:
+        return knowledge.query(body.query, top_k=body.top_k)
     except Exception as e:
         raise HTTPException(500, str(e))
 

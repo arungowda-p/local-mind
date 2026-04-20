@@ -276,162 +276,359 @@ def available_runtimes() -> dict[str, str | None]:
 
 def format_code(code: str, language: str) -> str:
     """
-    Format LLM-generated code: strip long comments, reindent by braces/keywords.
-    Preserves all actual code — never drops functional lines.
-    """
-    lang = normalize_language(language)
-    code = _strip_llm_comments(code, lang)
+    Format LLM-generated code into something readable.
 
-    if lang in ("javascript", "typescript"):
-        return _format_c_style(code)
-    if lang == "python":
-        return _format_python(code)
-    return code
+    - Strips long, narrative LLM comments while preserving short ones.
+    - Reindents by braces/keywords for C-style languages.
+    - Uses Black for Python when available, falling back to a safe
+      manual reindent that's tolerant of partial / broken snippets.
+    - Never raises: a fall-through returns the input unchanged.
+    """
+    if not code or not code.strip():
+        return code
+    try:
+        lang = normalize_language(language)
+    except Exception:
+        return code
+
+    try:
+        cleaned = _strip_llm_comments(code, lang)
+    except Exception:
+        cleaned = code
+
+    try:
+        if lang in ("javascript", "typescript"):
+            if not _braces_balanced(cleaned):
+                return cleaned
+            return _format_c_style(cleaned)
+        if lang == "python":
+            return _format_python(cleaned)
+        if lang in ("shell", "bash", "powershell"):
+            return _format_shell(cleaned)
+    except Exception as e:
+        log.debug("format_code(%s) failed: %s", lang, e)
+        return cleaned
+    return cleaned
+
+
+def _braces_balanced(code: str) -> bool:
+    """
+    Return True iff `(`, `[`, `{` are balanced in `code`, ignoring chars inside
+    strings and comments. Used to refuse formatting on broken LLM snippets so
+    we don't multiply the damage.
+    """
+    depth = {"(": 0, "[": 0, "{": 0}
+    pair = {")": "(", "]": "[", "}": "{"}
+    in_str: str | None = None
+    esc = False
+    i = 0
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if in_str is not None:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            in_str = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and code[i + 1] == "/":
+            nl = code.find("\n", i)
+            i = n if nl == -1 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and code[i + 1] == "*":
+            end = code.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        if ch in depth:
+            depth[ch] += 1
+        elif ch in pair:
+            depth[pair[ch]] -= 1
+            if depth[pair[ch]] < 0:
+                return False
+        i += 1
+    return all(v == 0 for v in depth.values())
 
 
 def _strip_llm_comments(code: str, lang: str) -> str:
-    """
-    Remove verbose LLM narration comments (>80 chars) but keep short ones.
-    Never removes a line entirely — if only a comment is on the line and
-    it's short, keep it.
-    """
+    """Remove only obviously verbose narrative comments (>120 chars)."""
+    LIMIT = 120
     lines = code.split("\n") if "\n" in code else [code]
     out: list[str] = []
     for line in lines:
         stripped = line
         if lang in ("javascript", "typescript"):
-            # Handle // comments — only strip if the comment part is very long
             m = re.search(r"\s*(//.*$)", stripped)
             if m:
-                comment = m.group(1)
-                before = stripped[:m.start()].rstrip()
-                if len(comment) > 80:
-                    stripped = before if before else ""
-                elif not before:
-                    # Line is only a comment — keep short ones
-                    stripped = line
-            # Handle /* ... */ inline — only strip long ones
-            stripped = re.sub(r"/\*[^*]{80,}?\*/", "", stripped)
+                comment = m.group(1).strip()
+                before = stripped[: m.start()].rstrip()
+                if len(comment) > LIMIT:
+                    stripped = before
+            stripped = re.sub(r"/\*[^*]{120,}?\*/", "", stripped)
         elif lang == "python":
-            m = re.search(r"\s*(#.*$)", stripped)
+            m = re.search(r"(?<!['\"])\s*(#.*$)", stripped)
             if m:
-                comment = m.group(1)
-                before = stripped[:m.start()].rstrip()
-                if len(comment) > 80:
-                    stripped = before if before else ""
+                comment = m.group(1).strip()
+                before = stripped[: m.start()].rstrip()
+                if len(comment) > LIMIT:
+                    stripped = before
         out.append(stripped)
-    # Rejoin, keeping empty lines as-is (don't collapse structure)
     return "\n".join(out)
 
 
+# ── C-style (JS / TS) formatter ──────────────────────────────────────────────
+
+_CONTINUATION_KEYWORDS = ("else", "catch", "finally")
+_INDENT = "  "
+
+
 def _format_c_style(code: str) -> str:
-    """Reindent JS/TS by splitting on braces, semicolons, keeping all code."""
+    """
+    Reindent JS/TS source code character-by-character.
+
+    Handles:
+      - String literals (`'`, `"`, `` ` ``) and template substitutions.
+      - Line (`//`) and block (`/* */`) comments.
+      - Brace-driven indentation, including `} else {`, `} catch {`, etc.
+      - Statement breaks on `;` outside `for(...)` headers.
+      - Collapses runs of whitespace, normalises blank lines.
+    """
+    text = code.replace("\r\n", "\n").replace("\r", "\n")
+    n = len(text)
     out: list[str] = []
     indent = 0
-    line = ""
+    line: list[str] = []
     in_string: str | None = None
+    string_escape = False
+    paren_depth = 0  # used to NOT split on `;` inside `for (...; ...; ...)`
     i = 0
 
-    while i < len(code):
-        ch = code[i]
+    def flush() -> None:
+        nonlocal line
+        s = "".join(line).strip()
+        if s:
+            out.append(_INDENT * indent + s)
+        line = []
 
-        # Track string literals — don't reformat inside them
-        if in_string:
-            line += ch
-            if ch == in_string and (i == 0 or code[i - 1] != "\\"):
+    while i < n:
+        ch = text[i]
+
+        if in_string is not None:
+            line.append(ch)
+            if string_escape:
+                string_escape = False
+            elif ch == "\\":
+                string_escape = True
+            elif ch == in_string:
                 in_string = None
             i += 1
             continue
-        if ch in ('"', "'", "`"):
+
+        if ch in ("'", '"', "`"):
             in_string = ch
-            line += ch
+            line.append(ch)
             i += 1
             continue
 
-        # // line comment — keep it on the current line, break after
-        if ch == "/" and i + 1 < len(code) and code[i + 1] == "/":
-            end = code.find("\n", i)
-            comment = code[i:end] if end >= 0 else code[i:]
-            # Only keep short comments
-            if len(comment) <= 80:
-                line += "  " + comment.strip()
-            i = (end + 1) if end >= 0 else len(code)
-            if line.strip():
-                out.append("    " * indent + line.strip())
-            line = ""
+        # Line comment
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i)
+            if end == -1:
+                end = n
+            comment = text[i:end].rstrip()
+            if line and "".join(line).strip():
+                line.append(" " + comment)
+            else:
+                out.append(_INDENT * indent + comment)
+                line = []
+            i = end + 1
             continue
 
-        # /* block comment */ — skip long ones, keep short
-        if ch == "/" and i + 1 < len(code) and code[i + 1] == "*":
-            end = code.find("*/", i + 2)
-            if end >= 0:
-                comment = code[i:end + 2]
-                if len(comment) <= 80:
-                    line += " " + comment.strip()
-                i = end + 2
+        # Block comment
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            end = text.find("*/", i + 2)
+            if end == -1:
+                line.append(text[i:])
+                i = n
                 continue
+            block = text[i : end + 2]
+            if "\n" in block:
+                flush()
+                for bl in block.split("\n"):
+                    out.append(_INDENT * indent + bl.strip())
+            else:
+                if line and "".join(line).strip():
+                    line.append(" " + block.strip())
+                else:
+                    out.append(_INDENT * indent + block.strip())
+            i = end + 2
+            continue
+
+        if ch == "(":
+            paren_depth += 1
+            line.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+            line.append(ch)
+            i += 1
+            continue
 
         if ch == "{":
-            line += " {"
-            out.append("    " * indent + line.strip())
-            line = ""
+            current = "".join(line).rstrip()
+            if current:
+                line = [current + " {"]
+            else:
+                line = ["{"]
+            flush()
             indent += 1
             i += 1
             continue
 
         if ch == "}":
-            if line.strip():
-                out.append("    " * indent + line.strip())
-                line = ""
+            flush()
             indent = max(0, indent - 1)
-            out.append("    " * indent + "}")
-            i += 1
-            # Check for else/else if/catch/finally after }
-            rest = code[i:].lstrip()
-            if rest.startswith(("else", "catch", "finally")):
-                # Keep on same line as }
-                out[-1] = out[-1]  # will be joined on next {
-            continue
-
-        if ch == ";":
-            line += ";"
-            out.append("    " * indent + line.strip())
-            line = ""
-            i += 1
-            continue
-
-        if ch in ("\n", "\r"):
+            # Detect `} else { / } catch { / } finally {` style continuations
+            j = i + 1
+            while j < n and text[j] in " \t":
+                j += 1
+            rest_token = ""
+            k = j
+            while k < n and text[k].isalpha():
+                rest_token += text[k]
+                k += 1
+            if rest_token in _CONTINUATION_KEYWORDS:
+                line = ["} " + rest_token]
+                i = k
+                continue
+            out.append(_INDENT * indent + "}")
             i += 1
             continue
 
-        # Collapse runs of spaces to one
-        if ch == " " and line.endswith(" "):
+        if ch == ";" and paren_depth == 0:
+            line.append(";")
+            flush()
             i += 1
             continue
 
-        line += ch
+        if ch == "\n":
+            # respect explicit newlines as statement boundaries
+            if "".join(line).strip():
+                flush()
+            else:
+                out.append("")
+                line = []
+            i += 1
+            continue
+
+        if ch in " \t":
+            if line and line[-1] not in (" ",) and "".join(line).strip():
+                line.append(" ")
+            i += 1
+            continue
+
+        line.append(ch)
         i += 1
 
-    if line.strip():
-        out.append("    " * indent + line.strip())
+    flush()
 
-    # Clean up empty lines but don't remove structure
-    result = "\n".join(out)
-    # Collapse 3+ blank lines to 1
-    result = re.sub(r"\n{3,}", "\n\n", result)
-    return result.strip()
+    # Tidy up: drop leading blanks; collapse ALL blank lines (no double-spaced output).
+    # We then add a single blank line between top-level definitions for readability.
+    lines = [ln for ln in out if ln.strip()]
+    result: list[str] = []
+    for i, ln in enumerate(lines):
+        result.append(ln)
+        # Insert a blank line after a top-level closing brace before the next top-level
+        # statement (improves readability between functions / classes / main code).
+        if (
+            ln.rstrip() == "}"
+            and i + 1 < len(lines)
+            and not lines[i + 1].startswith((" ", "\t", "}", ")", "]", ".", ","))
+        ):
+            result.append("")
+    return "\n".join(result).strip("\n")
 
+
+# ── Python formatter ─────────────────────────────────────────────────────────
 
 def _format_python(code: str) -> str:
-    """Reindent Python code, validating with ast if possible."""
-    import ast
+    """Use Black if installed (preferred); otherwise a safe manual reindent."""
     import textwrap
 
     clean = textwrap.dedent(code).strip()
-    try:
-        ast.parse(clean)
+    if not clean:
         return clean
+
+    try:
+        import black
+
+        try:
+            return black.format_str(clean, mode=black.Mode()).rstrip()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Manual fallback: split semicolons-at-top-level into separate statements
+    # and ensure code after `:` opens onto a new indented line.
+    lines = clean.split("\n")
+    fixed: list[str] = []
+    for raw in lines:
+        if not raw.strip():
+            fixed.append("")
+            continue
+        # Split `a = 1; b = 2` only if not in a string
+        if ";" in raw and not _in_python_string(raw):
+            parts = [p.strip() for p in raw.split(";") if p.strip()]
+            indent_ws = raw[: len(raw) - len(raw.lstrip())]
+            for p in parts:
+                fixed.append(indent_ws + p)
+        else:
+            fixed.append(raw.rstrip())
+    out = "\n".join(fixed)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+
+    # Validate; if it parses, great. Otherwise still return the cleaned text.
+    try:
+        import ast
+        ast.parse(out)
     except SyntaxError:
         pass
-    # If it doesn't parse, still return dedented version
-    return clean
+    return out
+
+
+def _in_python_string(line: str) -> bool:
+    """Quick heuristic: odd number of unescaped quotes → currently inside one."""
+    sq = len(re.findall(r"(?<!\\)'", line))
+    dq = len(re.findall(r'(?<!\\)"', line))
+    return (sq % 2 == 1) or (dq % 2 == 1)
+
+
+# ── Shell formatter ──────────────────────────────────────────────────────────
+
+def _format_shell(code: str) -> str:
+    """
+    Light shell formatter: split `;`-joined statements and trim trailing
+    whitespace. Avoids rewriting heredocs / quoted strings.
+    """
+    lines: list[str] = []
+    for raw in code.replace("\r\n", "\n").split("\n"):
+        if not raw.strip():
+            lines.append("")
+            continue
+        if ";" in raw and not (raw.count("'") % 2 or raw.count('"') % 2):
+            for piece in raw.split(";"):
+                if piece.strip():
+                    lines.append(piece.rstrip())
+        else:
+            lines.append(raw.rstrip())
+    out = "\n".join(lines).strip("\n")
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out

@@ -12,6 +12,21 @@ const RUNNABLE = new Set([
   "py", "js", "ts", "sh",
 ]);
 
+const BROWSER_ONLY_RE =
+  /\b(prompt|alert|confirm|document|window|localStorage|sessionStorage)\s*[(.[]/;
+
+function findBrowserOnlyAPIs(code: string, language: string): string[] {
+  const lang = language.toLowerCase();
+  if (!["js", "javascript", "ts", "typescript"].includes(lang)) return [];
+  const found = new Set<string>();
+  let m: RegExpExecArray | null;
+  const re = new RegExp(BROWSER_ONLY_RE.source, "g");
+  while ((m = re.exec(code)) !== null) {
+    found.add(m[1]);
+  }
+  return [...found];
+}
+
 function langLabel(lang: string): string {
   const map: Record<string, string> = {
     py: "Python", python: "Python", js: "JavaScript", javascript: "JavaScript",
@@ -61,7 +76,24 @@ export function CodeBlock({ code: rawCode, language }: CodeBlockProps) {
     finally { setFormatting(false); }
   }, [code, language]);
 
+  const browserOnly = findBrowserOnlyAPIs(code, language);
+
   const handleRun = useCallback(async () => {
+    if (browserOnly.length > 0) {
+      setResult({
+        language,
+        exit_code: -1,
+        stdout: "",
+        stderr:
+          `This code uses browser-only API${browserOnly.length > 1 ? "s" : ""}: ` +
+          `${browserOnly.join(", ")}. The runner is Node.js, so these are undefined. ` +
+          "Replace with a hardcoded value or read from process.stdin (use the Input button).",
+        timed_out: false,
+        duration_ms: 0,
+        ok: false,
+      });
+      return;
+    }
     setRunning(true);
     setResult(null);
     try {
@@ -80,7 +112,7 @@ export function CodeBlock({ code: rawCode, language }: CodeBlockProps) {
     } finally {
       setRunning(false);
     }
-  }, [code, language, stdin]);
+  }, [code, language, stdin, browserOnly]);
 
   const handleCopy = useCallback(async () => {
     await navigator.clipboard.writeText(code);

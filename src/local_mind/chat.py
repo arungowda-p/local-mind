@@ -3,10 +3,14 @@ from __future__ import annotations
 import re
 from typing import Any, Generator
 
-from local_mind.code_exec import extract_code_blocks, run_code
+from local_mind.code_exec import extract_code_blocks, format_code, run_code
+from local_mind.config import settings
 from local_mind.decision import decision_engine
 from local_mind.knowledge import knowledge
 from local_mind.models import model_manager
+from local_mind.web_crawl import crawl_and_learn
+
+WEB_CRAWL_CONF_THRESHOLD = 0.45
 
 
 _DEGRADE_STOP = (
@@ -112,23 +116,35 @@ SUMMARIZE_PROMPT = (
 )
 
 CODE_PROMPT = (
-    "You are a code assistant. You MUST follow these rules exactly:\n"
-    "1. Output ONLY a single fenced code block with the correct language tag.\n"
-    "2. The code MUST be properly formatted with newlines and indentation.\n"
-    "3. Do NOT put the entire function on one line.\n"
-    "4. Each statement gets its own line. Each { and } gets its own line.\n"
-    "5. Do NOT write long comments. At most a short 5-word comment per line.\n"
-    "6. After the code block, write ONE sentence describing what it does.\n"
-    "7. Do NOT repeat yourself. Do NOT ramble.\n"
-    "8. The code must be complete and runnable as-is.\n\n"
-    "Example of correct formatting:\n"
-    "```javascript\n"
-    "function add(a, b) {\n"
-    "    return a + b;\n"
-    "}\n"
-    "console.log(add(2, 3));\n"
-    "```\n"
-    "This function adds two numbers and prints the result."
+    "You are a code assistant. You write code that solves EXACTLY what the user asked, "
+    "nothing else.\n\n"
+    "Execution environment (your code runs here when the user clicks Run):\n"
+    "- JavaScript / TypeScript → Node.js subprocess. NO browser globals: do NOT use "
+    "`prompt`, `alert`, `confirm`, `document`, `window`, `localStorage`, `fetch` to "
+    "the DOM. For input, either hardcode example values OR read from `process.stdin`.\n"
+    "- Python → python3 subprocess. `input()` works only if the user pipes stdin; "
+    "prefer hardcoded example values so the code runs out of the box.\n"
+    "- Shell / PowerShell → runs as a script in a temp dir; no interactive prompts.\n\n"
+    "Hard rules:\n"
+    "1. Output exactly ONE fenced code block with the correct language tag, then ONE "
+    "short sentence (under 20 words) describing what it does.\n"
+    "2. SOLVE THE USER'S REQUEST. Do not substitute a different problem (e.g. if asked "
+    "for palindrome, write a palindrome — not a sum function).\n"
+    "3. Make the code immediately runnable: define your function AND call it once with "
+    "a hardcoded example, then print the result. Example pattern:\n"
+    "   ```javascript\n"
+    "   function isPalindrome(s) { /* ... */ }\n"
+    "   console.log(isPalindrome('racecar'));\n"
+    "   ```\n"
+    "4. Each statement on its own line, properly indented. Every `{` opens a block; "
+    "every `}` closes one.\n"
+    "5. The code must be complete, syntactically valid, and runnable with no edits.\n"
+    "6. Comments may be at most 8 words. Do not apologise or describe rules in comments.\n"
+    "7. Never invent variables you did not declare. Never call a function with the "
+    "wrong number of arguments. Do not interpolate the same variable twice in a "
+    "string when you mean two different things.\n"
+    "8. Do not repeat the user's question. Do not include phrases like "
+    "'here is an example of incorrect formatting'.\n"
 )
 
 
@@ -143,6 +159,39 @@ def _build_rag_context(query: str) -> tuple[str, list[dict[str, Any]]]:
     return "\n\n".join(lines), results
 
 
+def _augment_with_web(
+    query: str,
+    decision: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    If KB confidence is too low, crawl the web for fresh sources and
+    ingest them. Returns a summary of crawled sources, or None if skipped.
+    """
+    if not decision:
+        return None
+    action = decision.get("action", {}).get("action", "")
+    if action in ("write_code", "run_code", "learn_url", "clarify"):
+        return None
+    intent = decision.get("intent", {}).get("intent", "")
+    if intent == "chitchat":
+        return None
+    confidence = decision.get("confidence", {}) or {}
+    conf_score = float(confidence.get("confidence", 0.0))
+    if confidence.get("has_context") and conf_score >= WEB_CRAWL_CONF_THRESHOLD:
+        return None
+    summary = crawl_and_learn(query)
+    if summary.get("status") not in ("learned", "fetched"):
+        return summary
+    if summary.get("status") == "learned":
+        # Refresh confidence so downstream prompt + UI reflect the new context
+        try:
+            updated_conf = decision_engine.score_confidence(query)
+            decision["confidence"] = updated_conf
+        except Exception:
+            pass
+    return summary
+
+
 def _assemble_messages(
     user_message: str,
     history: list[dict[str, str]] | None = None,
@@ -152,30 +201,28 @@ def _assemble_messages(
     action = (decision or {}).get("action", {}).get("action", "rag_chat")
     conf = (decision or {}).get("confidence", {}).get("confidence", 1.0)
 
-    if action == "summarize":
+    ctx_text = ""
+    if use_rag:
         ctx_text, _ = _build_rag_context(user_message)
+
+    if action == "summarize":
         system = SUMMARIZE_PROMPT
         if ctx_text:
             system += "\n\n" + ctx_text
     elif action in ("write_code", "run_code"):
         system = CODE_PROMPT
-        if use_rag:
-            ctx_text, _ = _build_rag_context(user_message)
-            if ctx_text:
-                system += (
-                    "\n\nUse the following reference material to write better code. "
-                    "If it contains code examples, follow their patterns.\n\n"
-                    + ctx_text
-                )
-    elif action == "direct_chat" or not use_rag:
-        system = SYSTEM_PROMPT
+        if ctx_text:
+            system += (
+                "\n\nUse the following reference material to write better code. "
+                "If it contains code examples, follow their patterns.\n\n"
+                + ctx_text
+            )
     else:
-        ctx_text, _ = _build_rag_context(user_message)
         system = SYSTEM_PROMPT
         if ctx_text:
             system += "\n\n" + ctx_text
-        if conf < 0.45 and ctx_text:
-            system += LOW_CONFIDENCE_ADDENDUM
+            if conf < 0.45:
+                system += LOW_CONFIDENCE_ADDENDUM
 
     msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
     if history:
@@ -222,6 +269,68 @@ def _sanitize_output(text: str) -> str:
                 return good_part + _DEGRADE_STOP
 
     return text
+
+
+_FENCE_RE = re.compile(r"```\s*(\w*)\s*\n?([\s\S]*?)```")
+_OPEN_FENCE_RE = re.compile(r"```\s*(\w*)\s*\n([\s\S]*)$")
+
+_TRUNCATION_NOTE = (
+    "\n\n_The model stopped before finishing — likely too small for this task. "
+    "Try a larger model (Phi-3-mini or Qwen2.5-1.5B) or rephrase the request._"
+)
+
+
+def _repair_truncated_code(text: str) -> str:
+    """
+    Detect a code block that was opened (``` <lang>) but never closed (no
+    matching ```), or that obviously stops mid-statement. Append a closing
+    fence and a short truncation note so the UI can still render the partial
+    code AND signal the user that something went wrong.
+    """
+    if not text:
+        return text
+    # Are there an odd number of fences? Then the last block is unclosed.
+    fence_count = text.count("```")
+    if fence_count % 2 == 1:
+        # Find the last opened fence and its body
+        m = _OPEN_FENCE_RE.search(text)
+        body = (m.group(2) if m else "").rstrip()
+        # If the body is empty or ends with an opening brace / colon / comma
+        # it's truncated mid-statement → close cleanly + warn.
+        looks_truncated = (
+            not body
+            or body.endswith(("{", "(", "[", ",", ":"))
+            or body.count("{") > body.count("}")
+        )
+        text = text.rstrip() + "\n```"
+        if looks_truncated:
+            text += _TRUNCATION_NOTE
+        return text
+
+    # Even number of fences: still check if the LAST block looks unfinished.
+    matches = list(_FENCE_RE.finditer(text))
+    if matches:
+        body = (matches[-1].group(2) or "").rstrip()
+        if body and body.count("{") > body.count("}"):
+            return text + _TRUNCATION_NOTE
+    return text
+
+
+def _format_code_blocks(text: str) -> str:
+    """Run every fenced code block in `text` through the local formatter."""
+
+    def _replace(match: "re.Match[str]") -> str:
+        lang = (match.group(1) or "").strip() or "text"
+        body = match.group(2) or ""
+        try:
+            formatted = format_code(body, lang)
+        except Exception:
+            return match.group(0)
+        if not formatted.strip():
+            return match.group(0)
+        return f"```{lang}\n{formatted.strip()}\n```"
+
+    return _FENCE_RE.sub(_replace, text)
 
 
 def _extract_url(text: str) -> str | None:
@@ -294,18 +403,40 @@ def smart_chat(
             "decision": decision,
         }
 
-    effective_temp = 0.2 if action in ("write_code", "run_code") else temperature
+    web_summary = _augment_with_web(user_message, decision) if use_rag else None
+
+    is_code = action in ("write_code", "run_code")
+    effective_temp = 0.2 if is_code else temperature
+    effective_max = (
+        max_tokens
+        if max_tokens is not None
+        else (settings.llm_code_max_tokens if is_code else None)
+    )
+    effective_repeat = (
+        repeat_penalty
+        if repeat_penalty is not None
+        else (settings.llm_code_repeat_penalty if is_code else None)
+    )
     msgs = _assemble_messages(user_message, history, use_rag, decision)
     resp = model_manager.complete_chat(
         msgs,
-        max_tokens=max_tokens,
+        max_tokens=effective_max,
         temperature=effective_temp,
         stream=False,
-        repeat_penalty=repeat_penalty,
+        repeat_penalty=effective_repeat,
+        frequency_penalty=0.0 if is_code else None,
+        presence_penalty=0.0 if is_code else None,
     )
     text = resp["choices"][0]["message"]["content"]
     text = _sanitize_output(text)
-    return {"role": "assistant", "content": text, "decision": decision}
+    text = _repair_truncated_code(text)
+    text = _format_code_blocks(text)
+    return {
+        "role": "assistant",
+        "content": text,
+        "decision": decision,
+        "web_sources": web_summary,
+    }
 
 
 def smart_chat_stream(
@@ -368,16 +499,38 @@ def smart_chat_stream(
         yield {"type": "done"}
         return
 
-    effective_temp = 0.2 if action in ("write_code", "run_code") else temperature
+    if use_rag:
+        web_summary = _augment_with_web(user_message, decision)
+        if web_summary and web_summary.get("status") == "learned":
+            yield {"type": "decision", "decision": decision}
+            yield {"type": "web_sources", "web_sources": web_summary}
+        elif web_summary:
+            yield {"type": "web_sources", "web_sources": web_summary}
+
+    is_code = action in ("write_code", "run_code")
+    effective_temp = 0.2 if is_code else temperature
+    effective_max = (
+        max_tokens
+        if max_tokens is not None
+        else (settings.llm_code_max_tokens if is_code else None)
+    )
+    effective_repeat = (
+        repeat_penalty
+        if repeat_penalty is not None
+        else (settings.llm_code_repeat_penalty if is_code else None)
+    )
     msgs = _assemble_messages(user_message, history, use_rag, decision)
     stream = model_manager.complete_chat(
         msgs,
-        max_tokens=max_tokens,
+        max_tokens=effective_max,
         temperature=effective_temp,
         stream=True,
-        repeat_penalty=repeat_penalty,
+        repeat_penalty=effective_repeat,
+        frequency_penalty=0.0 if is_code else None,
+        presence_penalty=0.0 if is_code else None,
     )
     guard = _OutputGuard()
+    raw_chunks: list[str] = []
     for chunk in stream:
         delta = chunk.get("choices", [{}])[0].get("delta", {})
         token = delta.get("content")
@@ -387,7 +540,14 @@ def smart_chat_stream(
                 msg = _REPEAT_STOP if reason == "repetition" else _DEGRADE_STOP
                 yield {"type": "token", "token": msg}
                 break
+            raw_chunks.append(token)
             yield {"type": "token", "token": token}
+
+    full_text = "".join(raw_chunks)
+    repaired = _repair_truncated_code(full_text)
+    formatted = _format_code_blocks(repaired)
+    if formatted != full_text:
+        yield {"type": "rewrite", "content": formatted}
     yield {"type": "done"}
 
 

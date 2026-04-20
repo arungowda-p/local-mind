@@ -24,11 +24,28 @@ export interface CodeResult {
   ok: boolean;
 }
 
+export interface WebSource {
+  url: string;
+  title: string;
+  snippet?: string;
+  status?: string;
+  chunks?: number;
+  reason?: string;
+}
+
+export interface WebSearchSummary {
+  status: "learned" | "fetched" | "no_results" | string;
+  query: string;
+  chunks?: number;
+  sources: WebSource[];
+}
+
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   decision?: DecisionMeta;
   codeResults?: CodeResult[];
+  webSources?: WebSearchSummary;
 }
 
 export interface ModelInfo {

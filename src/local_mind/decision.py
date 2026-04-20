@@ -315,17 +315,19 @@ class DecisionEngine:
         if user_intent == "learn":
             boosts["learn_url"] += 0.4
         elif user_intent == "question":
-            if has_context and conf_score >= 0.45:
-                boosts["rag_chat"] += 0.3
+            if has_context:
+                boosts["rag_chat"] += 0.35
             else:
-                boosts["direct_chat"] += 0.2
+                boosts["direct_chat"] += 0.15
         elif user_intent == "code":
             boosts["write_code"] += 0.4
-            # If the message contains a code fence, user might want to run it
+            if has_context:
+                boosts["rag_chat"] += 0.1
             if "```" in text or "run this" in text.lower() or "execute" in text.lower():
                 boosts["run_code"] += 0.3
         elif user_intent == "action":
-            boosts["rag_chat"] += 0.15
+            if has_context:
+                boosts["rag_chat"] += 0.25
             boosts["summarize"] += 0.1
             boosts["write_code"] += 0.05
         elif user_intent == "clarify":

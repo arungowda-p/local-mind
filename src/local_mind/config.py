@@ -32,10 +32,13 @@ class Settings(BaseModel):
     llm_n_ctx: int = 4096
     llm_n_gpu_layers: int = 0
     llm_max_tokens: int = 1024
-    llm_repeat_penalty: float = 1.3
+    llm_repeat_penalty: float = 1.1
     llm_top_p: float = 0.9
-    llm_frequency_penalty: float = 0.2
-    llm_presence_penalty: float = 0.2
+    llm_frequency_penalty: float = 0.0
+    llm_presence_penalty: float = 0.0
+
+    llm_code_max_tokens: int = 1536
+    llm_code_repeat_penalty: float = 1.05
 
     embed_model_name: str = "all-MiniLM-L6-v2"
 
