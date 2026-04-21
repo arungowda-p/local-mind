@@ -3,13 +3,15 @@ import { api } from "@/api";
 import { ChatInput } from "@/components/ChatInput";
 import { ChatWindow } from "@/components/ChatWindow";
 import { Sidebar } from "@/components/Sidebar";
-import { TopBar } from "@/components/TopBar";
+import { TopBar, type View } from "@/components/TopBar";
+import { TranscribePage } from "@/components/TranscribePage";
 import { useChat } from "@/hooks/useChat";
 import { useVoice } from "@/hooks/useVoice";
 
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [modelName, setModelName] = useState<string | null>(null);
+  const [view, setView] = useState<View>("chat");
   const { messages, streaming, send, stop, clear } = useChat();
 
   useEffect(() => {
@@ -36,19 +38,27 @@ export default function App() {
       <main className="flex flex-1 flex-col overflow-hidden">
         <TopBar
           modelName={modelName}
+          view={view}
+          onViewChange={setView}
           onMenuClick={() => setSidebarOpen((v) => !v)}
           onClearChat={clear}
         />
-        <ChatWindow messages={messages} />
-        <ChatInput
-          onSend={handleSend}
-          onStop={stop}
-          streaming={streaming}
-          voiceRecording={recording}
-          voiceTranscribing={transcribing}
-          onVoiceToggle={toggleVoice}
-          disabled={!modelName}
-        />
+        {view === "chat" ? (
+          <>
+            <ChatWindow messages={messages} />
+            <ChatInput
+              onSend={handleSend}
+              onStop={stop}
+              streaming={streaming}
+              voiceRecording={recording}
+              voiceTranscribing={transcribing}
+              onVoiceToggle={toggleVoice}
+              disabled={!modelName}
+            />
+          </>
+        ) : (
+          <TranscribePage />
+        )}
       </main>
     </div>
   );

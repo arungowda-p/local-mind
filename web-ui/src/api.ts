@@ -1,4 +1,12 @@
-import type { CodeResult, HealthStatus, KnowledgeStats, ModelInfo } from "./types";
+import type {
+  CodeResult,
+  HealthStatus,
+  KnowledgeStats,
+  ModelInfo,
+  TranscribeOptions,
+  TranscribeStreamCallbacks,
+  TranscriptSegment,
+} from "./types";
 
 const BASE = "";
 
@@ -63,8 +71,8 @@ export const api = {
 
   transcribe: async (blob: Blob, language?: string): Promise<string> => {
     const fd = new FormData();
-    fd.append("audio", blob, "recording.wav");
-    const params = language ? `?language=${language}` : "";
+    fd.append("audio", blob, blobFilename(blob));
+    const params = language ? `?language=${encodeURIComponent(language)}` : "";
     const res = await fetch(`${BASE}/api/voice/transcribe${params}`, {
       method: "POST",
       body: fd,
@@ -73,4 +81,71 @@ export const api = {
     const data = (await res.json()) as { text: string };
     return data.text;
   },
+
+  transcribeStream: async (
+    blob: Blob | File,
+    opts: TranscribeOptions = {},
+    cb: TranscribeStreamCallbacks = {},
+  ): Promise<TranscriptSegment[]> => {
+    const fd = new FormData();
+    const name = blob instanceof File ? blob.name : blobFilename(blob);
+    fd.append("audio", blob, name);
+    const params = new URLSearchParams();
+    if (opts.language) params.set("language", opts.language);
+    if (opts.model) params.set("model", opts.model);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+
+    const res = await fetch(`${BASE}/api/voice/transcribe/stream${qs}`, {
+      method: "POST",
+      body: fd,
+      signal: cb.signal,
+    });
+    if (!res.ok || !res.body) {
+      throw new Error((await res.text().catch(() => "")) || `${res.status} ${res.statusText}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const segments: TranscriptSegment[] = [];
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const event = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        for (const line of event.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trimStart();
+          if (!payload) continue;
+          try {
+            const data = JSON.parse(payload);
+            if (data.type === "info") {
+              cb.onInfo?.(data);
+            } else if (data.type === "segment") {
+              segments.push(data);
+              cb.onSegment?.(data);
+            } else if (data.type === "error") {
+              cb.onError?.(data.message ?? "Transcription failed");
+            } else if (data.type === "done") {
+              cb.onDone?.(data.text ?? segments.map((s) => s.text).join(" ").trim());
+            }
+          } catch {
+            // ignore malformed events
+          }
+        }
+      }
+    }
+    return segments;
+  },
 };
+
+function blobFilename(blob: Blob): string {
+  const subtype = (blob.type.split("/")[1] ?? "").split(";")[0]?.trim();
+  const ext = subtype && subtype.length <= 8 ? subtype : "wav";
+  return `recording.${ext}`;
+}

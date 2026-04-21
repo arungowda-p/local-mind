@@ -68,3 +68,29 @@ export interface HealthStatus {
   model_name: string | null;
   knowledge_docs: number;
 }
+
+export interface TranscriptSegment {
+  index: number;
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface TranscriptInfo {
+  language: string;
+  language_probability: number;
+  duration: number;
+}
+
+export interface TranscribeStreamCallbacks {
+  onInfo?: (info: TranscriptInfo) => void;
+  onSegment?: (seg: TranscriptSegment) => void;
+  onError?: (msg: string) => void;
+  onDone?: (text: string) => void;
+  signal?: AbortSignal;
+}
+
+export interface TranscribeOptions {
+  language?: string;
+  model?: string;
+}

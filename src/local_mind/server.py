@@ -271,19 +271,57 @@ def knowledge_clear() -> dict[str, str]:
 async def voice_transcribe(
     audio: UploadFile = File(...),
     language: str | None = Query(None),
+    model: str | None = Query(None),
 ) -> dict[str, str]:
-    try:
-        from local_mind.voice import transcribe_bytes
-    except RuntimeError as e:
-        raise HTTPException(400, str(e))
     data = await audio.read()
     if len(data) < 100:
         raise HTTPException(400, "Audio too short")
     try:
-        text = transcribe_bytes(data, language=language)
+        from local_mind.voice import transcribe_bytes
+
+        text = transcribe_bytes(
+            data,
+            language=language,
+            model_size=model,
+            filename=audio.filename,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
     return {"text": text}
+
+
+@app.post("/api/voice/transcribe/stream")
+async def voice_transcribe_stream(
+    audio: UploadFile = File(...),
+    language: str | None = Query(None),
+    model: str | None = Query(None),
+) -> StreamingResponse:
+    data = await audio.read()
+    if len(data) < 100:
+        raise HTTPException(400, "Audio too short")
+    filename = audio.filename
+
+    def sse():
+        try:
+            from local_mind.voice import transcribe_stream
+
+            for evt in transcribe_stream(
+                data,
+                language=language,
+                model_size=model,
+                filename=filename,
+            ):
+                yield f"data: {json.dumps(evt)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

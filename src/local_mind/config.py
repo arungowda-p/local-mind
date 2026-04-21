@@ -42,7 +42,7 @@ class Settings(BaseModel):
 
     embed_model_name: str = "all-MiniLM-L6-v2"
 
-    whisper_model_size: str = "tiny"
+    whisper_model_size: str = "base"
 
     chunk_size: int = 512
     chunk_overlap: int = 64

@@ -244,10 +244,10 @@ if (-not (Test-Path $venvPy)) {
 # Step 3: Install dependencies if not already done
 $savedPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-$localmindPkg = & (Join-Path $VenvDir "Scripts\python.exe") -c "import local_mind; print('ok')" 2>$null
+$depsCheck = & (Join-Path $VenvDir "Scripts\python.exe") -c "import local_mind, faster_whisper; print('ok')" 2>$null
 $ErrorActionPreference = $savedPref
 
-if ($localmindPkg -ne "ok") {
+if ($depsCheck -ne "ok") {
     Install-Dependencies
 } else {
     Write-Ok "Dependencies already installed."
