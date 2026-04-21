@@ -1,4 +1,4 @@
-export type View = "chat" | "transcribe";
+export type View = "chat" | "transcribe" | "assistant";
 
 interface TopBarProps {
   modelName: string | null;
@@ -33,6 +33,9 @@ export function TopBar({
           </ViewTab>
           <ViewTab active={view === "transcribe"} onClick={() => onViewChange("transcribe")}>
             Transcribe
+          </ViewTab>
+          <ViewTab active={view === "assistant"} onClick={() => onViewChange("assistant")}>
+            Assistant
           </ViewTab>
         </div>
 

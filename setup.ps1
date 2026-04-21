@@ -197,7 +197,8 @@ function Install-Dependencies {
         & $py -m pip install llama-cpp-python --prefer-binary --no-warn-script-location 2>&1 | Out-Null
     }
 
-    & $py -m pip install -e "$ProjectRoot" --no-warn-script-location 2>&1 | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
+    Write-Host "   Installing local-mind with [assistant] extras..." -ForegroundColor DarkGray
+    & $py -m pip install -e "$ProjectRoot[assistant]" --no-warn-script-location 2>&1 | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
 
     $ErrorActionPreference = $savedPref
 
@@ -244,7 +245,7 @@ if (-not (Test-Path $venvPy)) {
 # Step 3: Install dependencies if not already done
 $savedPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-$depsCheck = & (Join-Path $VenvDir "Scripts\python.exe") -c "import local_mind, faster_whisper; print('ok')" 2>$null
+$depsCheck = & (Join-Path $VenvDir "Scripts\python.exe") -c "import local_mind, faster_whisper, openwakeword, pyttsx3, pynput, sounddevice; print('ok')" 2>$null
 $ErrorActionPreference = $savedPref
 
 if ($depsCheck -ne "ok") {

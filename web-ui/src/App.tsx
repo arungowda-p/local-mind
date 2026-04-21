@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/api";
+import { AssistantPage } from "@/components/AssistantPage";
 import { ChatInput } from "@/components/ChatInput";
 import { ChatWindow } from "@/components/ChatWindow";
 import { Sidebar } from "@/components/Sidebar";
@@ -56,8 +57,10 @@ export default function App() {
               disabled={!modelName}
             />
           </>
-        ) : (
+        ) : view === "transcribe" ? (
           <TranscribePage />
+        ) : (
+          <AssistantPage />
         )}
       </main>
     </div>

@@ -47,6 +47,14 @@ def main() -> None:
         help="Don't stream segments to stderr while transcribing.",
     )
 
+    assist = sub.add_parser(
+        "assistant",
+        help="Run the JARVIS-style voice assistant in the foreground (headless).",
+    )
+    assist.add_argument("--no-confirm", action="store_true", help="Skip confirmation for sensitive commands.")
+    assist.add_argument("--command", "-c", default=None, help="Run one command and exit (no voice loop).")
+    assist.add_argument("--no-speak", action="store_true", help="Don't speak results (with --command).")
+
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -67,6 +75,8 @@ def main() -> None:
             print(f"  {entry['name']:20s}  {dl}{sz}")
     elif args.command == "transcribe":
         _run_transcribe(args)
+    elif args.command == "assistant":
+        _run_assistant(args)
     else:
         parser.print_help()
         sys.exit(1)
@@ -152,6 +162,66 @@ def _run_transcribe(args: argparse.Namespace) -> None:
     else:
         sys.stdout.write(out)
         sys.stdout.flush()
+
+
+def _run_assistant(args: argparse.Namespace) -> None:
+    import queue as _queue
+
+    from local_mind.assistant import get_engine
+    from local_mind.config import settings
+
+    if args.no_confirm:
+        settings.assistant_require_confirmation = False
+
+    engine = get_engine()
+
+    if args.command:
+        result = engine.run_command(args.command, speak=not args.no_speak)
+        print(result.get("speech", ""))
+        if result.get("detail") and result["detail"] != result.get("speech"):
+            print(result["detail"])
+        sys.exit(0 if result.get("ok") else 1)
+
+    def _print(evt: dict) -> None:
+        kind = evt.get("kind", "?")
+        if kind == "state":
+            print(f"[state] {evt.get('state')}")
+        elif kind == "wake":
+            print(f"[wake]  {evt.get('model')} ({evt.get('score', 0):.2f})")
+        elif kind == "transcript":
+            print(f"[you]   {evt.get('text')}")
+        elif kind == "action":
+            result = evt.get("result", {})
+            ok = "ok" if result.get("ok") else "fail"
+            print(f"[do]    {evt.get('intent')} [{ok}] — {result.get('speech', '')}")
+        elif kind == "speech":
+            pass
+        elif kind == "error":
+            print(f"[err]   {evt.get('message')}", file=sys.stderr)
+        elif kind == "info":
+            print(f"[info]  {evt.get('message')}")
+
+    q = engine.events.subscribe()
+    engine.start()
+    status = engine.status()
+    print("─────────────────────────────────────────────")
+    print(" LocalMind Assistant — press Ctrl+C to stop.")
+    print(f"   wake word : {status['wake_word']}   (available: {status['wake_available']})")
+    print(f"   hotkey    : {status['hotkey']}")
+    print(f"   apps known: {status['app_count']}")
+    print("─────────────────────────────────────────────")
+
+    try:
+        while True:
+            try:
+                evt = q.get(timeout=0.5)
+            except _queue.Empty:
+                continue
+            _print(evt)
+    except KeyboardInterrupt:
+        print("\nStopping…")
+    finally:
+        engine.stop()
 
 
 if __name__ == "__main__":

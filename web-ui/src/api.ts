@@ -1,4 +1,7 @@
 import type {
+  AssistantApp,
+  AssistantCommandResponse,
+  AssistantStatus,
   CodeResult,
   HealthStatus,
   KnowledgeStats,
@@ -142,6 +145,24 @@ export const api = {
     }
     return segments;
   },
+
+  assistantStatus: () => json<AssistantStatus>("/api/assistant/status"),
+  assistantStart: () =>
+    json<AssistantStatus>("/api/assistant/start", { method: "POST" }),
+  assistantStop: () =>
+    json<AssistantStatus>("/api/assistant/stop", { method: "POST" }),
+  assistantTrigger: () =>
+    json<{ status: string }>("/api/assistant/trigger", { method: "POST" }),
+  assistantCommand: (text: string, speak = true) =>
+    json<AssistantCommandResponse>("/api/assistant/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, speak }),
+    }),
+  assistantApps: (limit = 200) =>
+    json<AssistantApp[]>(`/api/assistant/apps?limit=${limit}`),
+  assistantAppsRefresh: () =>
+    json<{ total: number }>("/api/assistant/apps/refresh", { method: "POST" }),
 };
 
 function blobFilename(blob: Blob): string {

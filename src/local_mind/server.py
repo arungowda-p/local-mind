@@ -324,6 +324,108 @@ async def voice_transcribe_stream(
     )
 
 
+# ── Assistant (JARVIS-style voice loop) ──────────────────────────────────────
+
+class AssistantCommand(BaseModel):
+    text: str
+    speak: bool = True
+
+
+@app.get("/api/assistant/status")
+def assistant_status() -> dict[str, Any]:
+    from local_mind.assistant import get_engine
+
+    return get_engine().status()
+
+
+@app.post("/api/assistant/start")
+def assistant_start() -> dict[str, Any]:
+    from local_mind.assistant import get_engine
+
+    engine = get_engine()
+    try:
+        engine.start()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return engine.status()
+
+
+@app.post("/api/assistant/stop")
+def assistant_stop() -> dict[str, Any]:
+    from local_mind.assistant import get_engine
+
+    engine = get_engine()
+    engine.stop()
+    return engine.status()
+
+
+@app.post("/api/assistant/command")
+def assistant_command(body: AssistantCommand) -> dict[str, Any]:
+    from local_mind.assistant import get_engine
+
+    return get_engine().run_command(body.text, speak=body.speak)
+
+
+@app.post("/api/assistant/trigger")
+def assistant_trigger() -> dict[str, Any]:
+    from local_mind.assistant import get_engine
+
+    engine = get_engine()
+    if not engine.status().get("running"):
+        raise HTTPException(400, "Assistant is not running.")
+    engine.trigger()
+    return {"status": "triggered"}
+
+
+@app.get("/api/assistant/apps")
+def assistant_apps(limit: int = Query(200, ge=1, le=1000)) -> list[dict[str, Any]]:
+    from local_mind.assistant import get_engine
+
+    return get_engine().list_apps(limit=limit)
+
+
+@app.post("/api/assistant/apps/refresh")
+def assistant_apps_refresh() -> dict[str, Any]:
+    from local_mind.assistant import get_engine
+
+    engine = get_engine()
+    apps = engine._apps.force_refresh()  # type: ignore[attr-defined]
+    return {"total": len(apps)}
+
+
+@app.get("/api/assistant/events")
+async def assistant_events() -> StreamingResponse:
+    import queue
+
+    from local_mind.assistant import get_engine
+
+    engine = get_engine()
+    sub = engine.events.subscribe()
+
+    def _get() -> dict[str, Any] | None:
+        try:
+            return sub.get(timeout=15.0)
+        except queue.Empty:
+            return None
+
+    async def sse():
+        try:
+            while True:
+                evt = await asyncio.to_thread(_get)
+                if evt is None:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"data: {json.dumps(evt)}\n\n"
+        finally:
+            engine.events.unsubscribe(sub)
+
+    return StreamingResponse(
+        sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")

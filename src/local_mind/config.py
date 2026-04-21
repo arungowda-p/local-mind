@@ -51,5 +51,26 @@ class Settings(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8766
 
+    # ── Assistant (JARVIS-style voice loop) ──────────────────────────────────
+    assistant_wake_word: str = "hey_jarvis_v0.1"
+    assistant_wake_threshold: float = 0.5
+    assistant_sample_rate: int = 16000
+    assistant_max_record_seconds: float = 12.0
+    assistant_min_record_seconds: float = 0.6
+    assistant_silence_ms: int = 1200
+    assistant_followup_seconds: float = 6.0
+    assistant_hotkey: str = "<ctrl>+<alt>+j"
+    assistant_tts_rate: int = 185
+    assistant_tts_voice: str | None = None
+    assistant_require_confirmation: bool = True
+    assistant_auto_start: bool = False
+
+    @property
+    def assistant_docs_dir(self) -> Path:
+        env = os.environ.get("LOCALMIND_DOCS_DIR")
+        if env:
+            return Path(env).expanduser().resolve()
+        return Path.home() / "Documents" / "LocalMind"
+
 
 settings = Settings()

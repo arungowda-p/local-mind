@@ -94,3 +94,60 @@ export interface TranscribeOptions {
   language?: string;
   model?: string;
 }
+
+export type AssistantState =
+  | "stopped"
+  | "starting"
+  | "idle"
+  | "listening"
+  | "processing"
+  | "speaking"
+  | "error";
+
+export interface AssistantStatus {
+  running: boolean;
+  state: AssistantState;
+  wake_available: boolean;
+  tts_available: boolean;
+  last_transcript: string;
+  app_count: number;
+  hotkey: string;
+  wake_word: string;
+}
+
+export interface AssistantActionResult {
+  ok: boolean;
+  speech: string;
+  detail?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface AssistantEvent {
+  ts: number;
+  kind:
+    | "state"
+    | "wake"
+    | "listening"
+    | "level"
+    | "transcript"
+    | "action"
+    | "speech"
+    | "info"
+    | "apps"
+    | "error";
+  [key: string]: unknown;
+}
+
+export interface AssistantCommandResponse {
+  ok: boolean;
+  speech: string;
+  detail: string;
+  intent: string;
+  data: Record<string, unknown>;
+}
+
+export interface AssistantApp {
+  name: string;
+  kind: "shortcut" | "uwp" | "command";
+  path: string;
+}
