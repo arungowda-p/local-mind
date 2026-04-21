@@ -3,7 +3,9 @@ Web crawl fallback for LocalMind.
 
 When the local knowledge base cannot answer a query (low confidence or
 empty), this module:
-  1. Searches the web via DuckDuckGo's HTML endpoint (no API key needed).
+  1. Searches the web — Google first, DuckDuckGo as an automatic fallback
+     when Google serves us its JS-challenge or consent page (which it does
+     aggressively for non-browser clients).
   2. Fetches the top N result pages.
   3. Ingests them into the knowledge base via `knowledge.learn_url`.
   4. Re-queries the KB so the chat layer can answer using fresh context.
@@ -27,19 +29,26 @@ from local_mind.knowledge import knowledge
 
 log = logging.getLogger(__name__)
 
+GOOGLE_SEARCH_ENDPOINT = "https://www.google.com/search"
 DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+# Short-circuit Google's consent interstitial (EU / first-time visitors).
+_CONSENT_COOKIE = "CONSENT=YES+cb; SOCS=CAESHAgBEhJnd3NfMjAyMzA1MjktMF9SQzIaAmVuIAEaBgiA4OzBBg"
 
 DEFAULT_MAX_RESULTS = 4
 DEFAULT_TIMEOUT_S = 15
 
 _BLOCKED_HOSTS = {
-    "duckduckgo.com",
     "google.com",
+    "google.co",
+    "googleusercontent.com",
+    "webcache.googleusercontent.com",
+    "duckduckgo.com",
     "bing.com",
     "youtube.com",
     "youtu.be",
@@ -58,17 +67,19 @@ class SearchHit:
     snippet: str
 
 
-def _normalize_ddg_link(href: str) -> str | None:
-    """DDG wraps result links in /l/?uddg=<encoded>; unwrap to the real URL."""
+def _normalize_google_link(href: str) -> str | None:
+    """Google wraps result links in /url?q=<encoded>&sa=...; unwrap to the real URL."""
     if not href:
         return None
     try:
-        parsed = urlparse(href)
-        if parsed.path.startswith("/l/") or "uddg" in parsed.query:
+        if href.startswith("/url") or href.startswith("/search"):
+            parsed = urlparse(href)
             qs = parse_qs(parsed.query)
-            target = qs.get("uddg", [None])[0]
-            if target:
-                return unquote(target)
+            for key in ("q", "url"):
+                target = qs.get(key, [None])[0]
+                if target and target.startswith("http"):
+                    return unquote(target)
+            return None
         if href.startswith("//"):
             return "https:" + href
         if href.startswith("http"):
@@ -91,10 +102,88 @@ def _is_allowed(url: str) -> bool:
     return True
 
 
-def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[SearchHit]:
-    """Run a DuckDuckGo HTML search and return up to N parsed hits."""
-    if not query.strip():
+def _normalize_ddg_link(href: str) -> str | None:
+    if not href:
+        return None
+    try:
+        parsed = urlparse(href)
+        if parsed.path.startswith("/l/") or "uddg" in parsed.query:
+            target = parse_qs(parsed.query).get("uddg", [None])[0]
+            if target:
+                return unquote(target)
+        if href.startswith("//"):
+            return "https:" + href
+        if href.startswith("http"):
+            return href
+    except Exception:
+        return None
+    return None
+
+
+def _search_google(query: str, max_results: int) -> list[SearchHit]:
+    try:
+        resp = httpx.get(
+            GOOGLE_SEARCH_ENDPOINT,
+            params={
+                "q": query,
+                "num": max(10, max_results * 3),
+                "hl": "en",
+                "gl": "us",
+                "pws": 0,
+            },
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Cookie": _CONSENT_COOKIE,
+            },
+            timeout=DEFAULT_TIMEOUT_S,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.info("Google search failed (%s); will try fallback.", e)
         return []
+
+    final = str(resp.url)
+    if "consent.google.com" in final or "/sorry/" in final:
+        log.info("Google returned a consent/block page; will try fallback.")
+        return []
+    # Detect the JS-challenge page Google serves to non-browser clients.
+    if "/httpservice/retry/enablejs" in resp.text or "enablejs" in resp.text[:2000]:
+        log.info("Google returned a JS-challenge page; will try fallback.")
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    hits: list[SearchHit] = []
+    seen: set[str] = set()
+
+    containers = soup.select("div.g, div.tF2Cxc, div[data-hveid]") or [soup]
+    for result in containers:
+        link_el = result.select_one('a[href^="/url?q="], a[href^="/url?"], a[href^="http"]')
+        if not link_el:
+            continue
+        target = _normalize_google_link(link_el.get("href", ""))
+        if not target or target in seen or not _is_allowed(target):
+            continue
+        title_el = result.select_one("h3") or link_el
+        snippet_el = result.select_one(
+            "div.VwiC3b, span.VwiC3b, div[data-sncf], .lEBKkf, .lyLwlc"
+        )
+        title = title_el.get_text(" ", strip=True)
+        snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+        if not title:
+            continue
+        seen.add(target)
+        hits.append(SearchHit(title=title, url=target, snippet=snippet))
+        if len(hits) >= max_results:
+            break
+
+    log.info("Google search '%s' → %d hits", query, len(hits))
+    return hits
+
+
+def _search_ddg(query: str, max_results: int) -> list[SearchHit]:
     try:
         resp = httpx.post(
             DDG_HTML_ENDPOINT,
@@ -108,7 +197,7 @@ def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[SearchHit
         )
         resp.raise_for_status()
     except Exception as e:
-        log.warning("Web search failed: %s", e)
+        log.warning("DuckDuckGo search failed: %s", e)
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -131,8 +220,23 @@ def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[SearchHit
         if len(hits) >= max_results:
             break
 
-    log.info("Web search '%s' → %d hits", query, len(hits))
+    log.info("DuckDuckGo fallback '%s' → %d hits", query, len(hits))
     return hits
+
+
+def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[SearchHit]:
+    """Run a web search and return up to N parsed hits.
+
+    Tries Google first; if Google returns zero hits (consent gate, JS
+    challenge, or 429), falls back to DuckDuckGo HTML so the KB ingest
+    pipeline keeps working without user intervention.
+    """
+    if not query.strip():
+        return []
+    hits = _search_google(query, max_results)
+    if hits:
+        return hits
+    return _search_ddg(query, max_results)
 
 
 def _shorten(text: str, limit: int = 280) -> str:

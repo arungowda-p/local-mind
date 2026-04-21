@@ -57,30 +57,37 @@ SITE_ALIASES: dict[str, str] = {
     "spotify": "https://open.spotify.com",
     "news": "https://news.google.com",
     "google news": "https://news.google.com",
-    "weather": "https://duckduckgo.com/?q=%21ducky+weather+today",
+    "weather": "https://www.google.com/search?q=weather",
     "calendar": "https://calendar.google.com",
     "google calendar": "https://calendar.google.com",
 }
 
-# DuckDuckGo bang prefixes for site-scoped search.
-SITE_BANGS: dict[str, str] = {
-    "youtube": "yt",
-    "yt": "yt",
-    "github": "gh",
-    "gh": "gh",
-    "stackoverflow": "so",
-    "so": "so",
-    "reddit": "r",
-    "twitter": "tw",
-    "x": "tw",
-    "wikipedia": "w",
-    "wiki": "w",
-    "amazon": "amazon",
-    "maps": "gm",
-    "google maps": "gm",
-    "google": "g",
-    "npm": "npm",
-    "pypi": "pypi",
+# Native search-URL templates per site. The placeholder ``{q}`` is filled
+# with a URL-encoded query. Unknown sites fall back to a Google ``site:``
+# search.
+SITE_SEARCH_URLS: dict[str, str] = {
+    "youtube":        "https://www.youtube.com/results?search_query={q}",
+    "yt":             "https://www.youtube.com/results?search_query={q}",
+    "github":         "https://github.com/search?q={q}&type=repositories",
+    "gh":             "https://github.com/search?q={q}&type=repositories",
+    "stackoverflow":  "https://stackoverflow.com/search?q={q}",
+    "stack overflow": "https://stackoverflow.com/search?q={q}",
+    "so":             "https://stackoverflow.com/search?q={q}",
+    "reddit":         "https://www.reddit.com/search/?q={q}",
+    "twitter":        "https://x.com/search?q={q}",
+    "x":              "https://x.com/search?q={q}",
+    "wikipedia":      "https://en.wikipedia.org/w/index.php?search={q}",
+    "wiki":           "https://en.wikipedia.org/w/index.php?search={q}",
+    "amazon":         "https://www.amazon.com/s?k={q}",
+    "maps":           "https://www.google.com/maps/search/{q}",
+    "google maps":    "https://www.google.com/maps/search/{q}",
+    "google":         "https://www.google.com/search?q={q}",
+    "npm":            "https://www.npmjs.com/search?q={q}",
+    "pypi":           "https://pypi.org/search/?q={q}",
+    "news":           "https://news.google.com/search?q={q}",
+    "linkedin":       "https://www.linkedin.com/search/results/all/?keywords={q}",
+    "spotify":        "https://open.spotify.com/search/{q}",
+    "netflix":        "https://www.netflix.com/search?q={q}",
 }
 
 _URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
@@ -271,22 +278,27 @@ class ActionRegistry:
     def search_web(self, query: str) -> ActionResult:
         if not query:
             return ActionResult(False, "Search for what?")
-        url = "https://duckduckgo.com/?q=" + quote_plus(query)
+        url = "https://www.google.com/search?q=" + quote_plus(query)
         webbrowser.open(url, new=2)
-        return ActionResult(True, f"Searching the web for {query}.", data={"url": url, "query": query})
+        return ActionResult(True, f"Searching Google for {query}.", data={"url": url, "query": query})
 
     def search_on_site(self, query: str, site: str) -> ActionResult:
-        site_key = site.strip().lower()
-        bang = SITE_BANGS.get(site_key)
-        if not bang:
-            for alias, b in SITE_BANGS.items():
+        site_key = re.sub(r"\s+", " ", site.strip().lower())
+        template = SITE_SEARCH_URLS.get(site_key)
+        if not template:
+            for alias, tmpl in SITE_SEARCH_URLS.items():
                 if alias in site_key:
-                    bang = b
+                    template = tmpl
+                    site_key = alias
                     break
-        if bang:
-            url = f"https://duckduckgo.com/?q=%21{bang}+{quote_plus(query)}"
+        if template:
+            url = template.format(q=quote_plus(query))
         else:
-            url = f"https://duckduckgo.com/?q={quote_plus(query + ' ' + site)}"
+            domain = SITE_ALIASES.get(site_key, "").replace("https://", "").replace("http://", "").rstrip("/")
+            if domain:
+                url = f"https://www.google.com/search?q=site%3A{quote_plus(domain)}+{quote_plus(query)}"
+            else:
+                url = f"https://www.google.com/search?q={quote_plus(query + ' ' + site)}"
         webbrowser.open(url, new=2)
         return ActionResult(True, f"Searching {site} for {query}.", data={"url": url, "site": site, "query": query})
 
@@ -317,9 +329,9 @@ class ActionRegistry:
             if alias == q or re.search(rf"\b{re.escape(alias)}\b", q):
                 return self.open_url(SITE_ALIASES[alias])
 
-        url = f"https://duckduckgo.com/?q=%21ducky+{quote_plus(raw)}"
+        url = f"https://www.google.com/search?q={quote_plus(raw)}"
         webbrowser.open(url, new=2)
-        return ActionResult(True, f"I couldn't match '{raw}', so I searched the web.", data={"url": url, "query": raw})
+        return ActionResult(True, f"I couldn't match '{raw}', so I searched Google.", data={"url": url, "query": raw})
 
     def refresh_apps(self) -> ActionResult:
         before = len(self.apps.refresh())
