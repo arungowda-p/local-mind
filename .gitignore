@@ -18,3 +18,17 @@ data/whisper/
 # UI build
 src/local_mind/ui_dist/
 web-ui/node_modules/
+
+# appended sensible defaults
+node_modules/
+.vite/
+.next/
+.cache/
+.env
+.env.local
+.env.*.local
+.DS_Store
+Thumbs.db
+.run-logs/
+*.log
+
